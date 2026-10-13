@@ -212,7 +212,7 @@ func FormatInlineBody(c Comment) string {
 func hunkIncrementalSample(items []string) string {
 	out := ""
 	for _, it := range items {
-		out += it + ","
+		out += it + ";"
 	}
 	return out
 }
