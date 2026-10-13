@@ -131,6 +131,8 @@ type ReviewStats struct {
 	Severity     map[string]int // 各严重级的意见数
 	InputTokens  int64          // 输入 token 合计
 	OutputTokens int64          // 输出 token 合计
+	PrevComments int            // 历史上已提交的 AI 行内意见数（用于采纳率）
+	Adopted      int            // 其中获得 👍 reaction 的条数
 }
 
 // FormatStatsFooter 渲染审查统计信息，附在 review 正文末尾，便于观察每次审查的成本与产出。
@@ -153,6 +155,9 @@ func FormatStatsFooter(s ReviewStats) string {
 	}
 	if len(parts) > 0 {
 		fmt.Fprintf(&sb, "- 严重级分布：%s\n", strings.Join(parts, "，"))
+	}
+	if s.PrevComments > 0 {
+		fmt.Fprintf(&sb, "- 历史意见采纳：%d/%d 条获得 👍\n", s.Adopted, s.PrevComments)
 	}
 	sb.WriteString("\n</details>")
 	return sb.String()

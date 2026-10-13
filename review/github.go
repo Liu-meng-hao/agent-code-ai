@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strings"
 )
 
 // reviewComment 是挂在 diff 具体代码行上的行内评论。
@@ -66,6 +67,49 @@ func submitBatched(cfg *Config, body string, comments []reviewComment) error {
 		}
 	}
 	return nil
+}
+
+// prComment 是 PR 上已存在的一条 review 评论，仅取采纳统计所需字段。
+type prComment struct {
+	Body      string `json:"body"`
+	Reactions struct {
+		PlusOne int `json:"+1"`
+	} `json:"reactions"`
+}
+
+// CountAdoptions 统计此前提交的 AI 行内意见中被采纳的条数：采纳定义为评论获得了 👍（+1）reaction。
+// 返回历史行内意见总数与其中被采纳的条数。查询失败只记录日志并返回 0，不影响本次审查。
+func CountAdoptions(cfg *Config) (total, adopted int) {
+	endpoint := fmt.Sprintf("repos/%s/%s/pulls/%s/comments", cfg.Owner, cfg.Repo, cfg.PRNumber)
+	cmd := exec.Command("gh", "api", "--paginate", endpoint)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Printf("[ai-review] 查询历史评论 reactions 失败（跳过采纳统计）: %v: %s\n", err, strings.TrimSpace(stderr.String()))
+		return 0, 0
+	}
+
+	// gh api --paginate 会把多页数组依次拼接输出（[..][..]），用流式解码逐页读取。
+	dec := json.NewDecoder(&stdout)
+	for {
+		var page []prComment
+		if err := dec.Decode(&page); err != nil {
+			break
+		}
+		for _, c := range page {
+			// 只统计本流程提交的行内意见（正文以 "**[严重级]**" 开头）
+			if !strings.HasPrefix(strings.TrimSpace(c.Body), "**[") {
+				continue
+			}
+			total++
+			if c.Reactions.PlusOne > 0 {
+				adopted++
+			}
+		}
+	}
+	return total, adopted
 }
 
 // submitIndividually 逐条提交行内评论：单条失败只记录日志、不影响其余（难点 3.3 降级）。

@@ -75,12 +75,15 @@ func TestFormatStatsFooter(t *testing.T) {
 		Severity:     map[string]int{"critical": 1, "high": 2},
 		InputTokens:  1200,
 		OutputTokens: 300,
+		PrevComments: 4,
+		Adopted:      3,
 	})
 	for _, want := range []string{
 		"调用 LLM：2 次",
 		"输入 1200，输出 300，合计 1500",
 		"意见：3 条（行内 2，正文 1）",
 		"critical 1，high 2",
+		"历史意见采纳：3/4 条获得 👍",
 	} {
 		if !strings.Contains(footer, want) {
 			t.Errorf("统计信息缺少 %q，实际: %s", want, footer)
@@ -91,5 +94,9 @@ func TestFormatStatsFooter(t *testing.T) {
 	none := FormatStatsFooter(ReviewStats{Total: 0})
 	if strings.Contains(none, "token 用量") {
 		t.Errorf("无用量数据时不应输出 token 行: %s", none)
+	}
+	// 无历史评论时不应输出采纳行
+	if strings.Contains(none, "历史意见采纳") {
+		t.Errorf("无历史评论时不应输出采纳行: %s", none)
 	}
 }

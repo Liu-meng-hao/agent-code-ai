@@ -96,6 +96,8 @@ func run() error {
 	for _, c := range comments {
 		severityCount[normalizedSeverity(c.Severity)]++
 	}
+	// 查询此前提交的 AI 意见的 👍 reaction，补齐「采纳率」维度（难点 10）
+	prevComments, adopted := CountAdoptions(cfg)
 	stats := ReviewStats{
 		Batches:      len(batches),
 		Total:        len(comments),
@@ -104,6 +106,8 @@ func run() error {
 		Severity:     severityCount,
 		InputTokens:  totalUsage.Input,
 		OutputTokens: totalUsage.Output,
+		PrevComments: prevComments,
+		Adopted:      adopted,
 	}
 	statsFooter := FormatStatsFooter(stats)
 
@@ -112,6 +116,9 @@ func run() error {
 	fmt.Printf("[ai-review] 意见 %d 条：行内 %d 条，整体正文 %d 条\n", len(comments), len(inline), len(orphan))
 	fmt.Printf("[ai-review] token 用量：输入 %d，输出 %d，合计 %d；调用 LLM %d 次\n",
 		totalUsage.Input, totalUsage.Output, totalUsage.Input+totalUsage.Output, len(batches))
+	if prevComments > 0 {
+		fmt.Printf("[ai-review] 历史意见采纳：%d/%d 条获得 👍\n", adopted, prevComments)
+	}
 
 	if err := submitWithFallback(cfg, inlineBody, fullBody, payloadComments); err != nil {
 		return err
