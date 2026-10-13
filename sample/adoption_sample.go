@@ -16,5 +16,6 @@ func FindUser(db *sql.DB, id int64) (string, error) {
 		return "", err
 	}
 	// run2：触发增量审查，验证历史意见采纳率统计
+	// run3：再次触发，验证行内评论 👍 被计入采纳率
 	return fmt.Sprintf("user:%s", name), nil
 }
