@@ -1,0 +1,16 @@
+# 环境变量与密钥，切勿提交
+.env
+.env.*
+*.key
+*.pem
+
+# 编译产物
+/review/review
+/review/review.exe
+*.exe
+*.test
+*.out
+
+# 编辑器
+.idea/
+.vscode/
