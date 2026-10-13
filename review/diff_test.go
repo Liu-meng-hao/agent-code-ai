@@ -38,6 +38,34 @@ func TestIsLowValueFile(t *testing.T) {
 	}
 }
 
+func TestSplitDiffHunks(t *testing.T) {
+	const header = "diff --git a/x.go b/x.go\n" +
+		"index 111..222 100644\n" +
+		"--- a/x.go\n+++ b/x.go\n"
+	hunk := func(start int, body string) string {
+		return fmt.Sprintf("@@ -%d,1 +%d,1 @@\n+%s\n", start, start, body)
+	}
+
+	// 两个 hunk：文件头与 hunk 应被正确分离，拼接后与原文一致
+	diff := header + hunk(1, "a") + hunk(20, "b")
+	head, hunks := splitDiffHunks(diff)
+	if head != header {
+		t.Errorf("文件头不符，实际: %q", head)
+	}
+	if len(hunks) != 2 {
+		t.Fatalf("应切出 2 个 hunk，实际 %d", len(hunks))
+	}
+	if got := head + hunks[0] + hunks[1]; got != diff {
+		t.Errorf("分离后拼接应还原原文\n实际: %q\n期望: %q", got, diff)
+	}
+
+	// 无 hunk：hunks 为空，全部内容归入文件头
+	head, hunks = splitDiffHunks(header)
+	if len(hunks) != 0 || head != header {
+		t.Errorf("无 hunk 时不应切出 hunk，且文件头为原文，实际 head=%q hunks=%v", head, hunks)
+	}
+}
+
 func TestSplitFileDiff(t *testing.T) {
 	const header = "diff --git a/big.go b/big.go\n" +
 		"index 111..222 100644\n" +

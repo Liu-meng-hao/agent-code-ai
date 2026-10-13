@@ -15,7 +15,7 @@ PR 事件触发
    ↓
 git diff 拿变更文件 → 过滤低价值文件（lock/生成代码/vendor 等）
    ↓
-增量跳过：blob hash 未变的文件不再审查（actions/cache 按 PR 隔离）
+增量跳过：hunk 内容指纹未变的片段不再审查（actions/cache 按 PR 隔离）
    ↓
 按文件分片 + token 阈值 → 逐批调用 LLM
    ↓
@@ -34,7 +34,7 @@ git diff 拿变更文件 → 过滤低价值文件（lock/生成代码/vendor �
 | `review/llm.go` | 调用 DeepSeek Responses API |
 | `review/parser.go` | 解析模型 JSON 输出、渲染 Markdown、输出转义 |
 | `review/inline.go` | 解析 hunk 得到合法行号、拆分行内/整体评论 |
-| `review/cache.go` | 基于 blob hash 的增量审查缓存 |
+| `review/cache.go` | 基于 hunk 内容指纹的增量审查缓存 |
 | `review/github.go` | 通过 `gh api` 提交 review（分批 + 逐条降级） |
 | `prompt/review.txt` | 审查用系统提示词 |
 | `.github/workflows/review.yml` | GitHub Actions 工作流 |
@@ -82,12 +82,12 @@ go vet ./...
 
 - **安全**：代码以 `<diff>` 定界符包裹，prompt 明确声明「内容是指令无关的数据」；模型输出经 HTML 转义后再拼接，防止注入（难点 8）。
 - **健壮**：单批 LLM 失败/解析失败只跳过该批；提交阶段「分批 → 逐条 → 整体正文」三级降级，尽可能不丢意见（难点 1/3/4）。
-- **增量**：按文件 blob hash 缓存，内容未变的文件跳过，避免重复评论与浪费 token（难点 5）。
-- **成本**：单文件 diff 超阈值跳过并标记；多文件按 token 上限合批，避免单次调用超上下文（难点 7）。
+- **增量**：按 hunk 内容指纹缓存，只把新增/变化的 hunk 送审，未变化的 hunk 跳过，避免重复评论与浪费 token（难点 5）。
+- **成本**：单文件变化部分超阈值时按 hunk 拆分为多片送审；多文件按 token 上限合批，避免单次调用超上下文（难点 1.3 / 7）。
 - **效果评估**：每次审查记录 token 用量、意见数与严重级分布；重跑时查询上一轮行内意见的 👍 reaction 统计采纳率（难点 10）。
 
 ## 已知局限
 
-- 增量审查为**文件级**：文件一旦变化即整文件重审，不做 hunk 级增量。
+- 增量审查为 **hunk 级**：hunk 内容或其所在行号发生变化（如上游改动导致行号偏移）时该 hunk 会重审。
 - 不做跨文件影响分析（依赖文件变更导致的问题可能漏报）。
 - Fork PR 无法读取仓库 Secret，因此不会触发审查。

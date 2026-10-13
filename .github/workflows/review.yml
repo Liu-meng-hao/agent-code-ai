@@ -47,7 +47,7 @@ jobs:
           echo "base_sha=$(gh api repos/$REPO/pulls/$PR --jq .base.sha)" >> "$GITHUB_OUTPUT"
           echo "head_sha=$(gh api repos/$REPO/pulls/$PR --jq .head.sha)" >> "$GITHUB_OUTPUT"
 
-      # 恢复按 PR 号隔离的增量审查缓存（记录已审查文件及其 blob hash）
+      # 恢复按 PR 号隔离的增量审查缓存（记录各文件已审查过的 hunk 内容指纹）
       - name: Restore review cache
         uses: actions/cache@v5
         with:

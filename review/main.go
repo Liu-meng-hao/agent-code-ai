@@ -33,17 +33,14 @@ func run() error {
 		return nil
 	}
 
-	// 增量：跳过之前已审查且内容未变化的文件
+	// 增量（hunk 粒度）：跳过上次已审查且内容未变化的 hunk，只把新增/变化的 hunk 送审
 	cache := loadCache()
-	toReview, hashes := SelectUnchanged(files, cfg.HeadSHA, cache)
-	if len(toReview) == 0 {
-		fmt.Printf("[ai-review] 变更文件 %d 个，均已审查且未变化，跳过\n", len(files))
+	batches, skipped, snapshot := buildBatches(cfg.BaseSHA, cfg.HeadSHA, files, cache)
+	if len(batches) == 0 {
+		fmt.Printf("[ai-review] 变更文件 %d 个，所有 hunk 均已审查且未变化，跳过\n", len(files))
 		return nil
 	}
-	fmt.Printf("[ai-review] 变更文件 %d 个，本次待审查 %d 个: %v\n", len(files), len(toReview), toReview)
-
-	batches, skipped := buildBatches(cfg.BaseSHA, cfg.HeadSHA, toReview)
-	fmt.Printf("[ai-review] 待审查文件 %d 个，分为 %d 批调用 LLM；跳过超大文件 %d 个\n", len(toReview), len(batches), len(skipped))
+	fmt.Printf("[ai-review] 变更文件 %d 个，本次待审查 %d 批；跳过超大文件 %d 个\n", len(files), len(batches), len(skipped))
 
 	// 逐批调用 LLM，单批失败只跳过该批，不影响其他批次（难点 1.1 分片）
 	var comments []Comment
@@ -130,12 +127,12 @@ func run() error {
 		return err
 	}
 
-	// 提交成功后才记录本次已审查的文件，供下一次增量跳过；
+	// 提交成功后才记录各文件当前的 hunk 指纹，供下一次增量跳过；
 	// 被跳过的超大文件不记录，以便下次重新评估。
 	for _, f := range skipped {
-		delete(hashes, f)
+		delete(snapshot, f)
 	}
-	cache.markReviewed(hashes)
+	cache.markReviewed(snapshot)
 	if err := cache.save(); err != nil {
 		fmt.Printf("[ai-review] 写入增量缓存失败（不影响审查）: %v\n", err)
 	}
