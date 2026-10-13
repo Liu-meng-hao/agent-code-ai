@@ -1,6 +1,7 @@
 package demo
 
 import (
+	"context"
 	"os"
 	"strings"
 )
@@ -19,5 +20,24 @@ func CloseAll(paths []string) {
 			continue
 		}
 		defer f.Close()
+	}
+}
+
+// 硬编码 context.Background()，无法响应上游取消
+func FetchAll(ids []string) []string {
+	var out []string
+	for _, id := range ids {
+		v, _ := fetchOne(context.Background(), id)
+		out = append(out, v)
+	}
+	return out
+}
+
+func fetchOne(ctx context.Context, id string) (string, error) {
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	default:
+		return "ok:" + id, nil
 	}
 }
