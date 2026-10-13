@@ -90,7 +90,7 @@ func run() error {
 	// 超大文件跳过说明与无法结构化解析的原始输出，补充到整体正文，避免信息丢失
 	notes := ""
 	if len(skipped) > 0 {
-		notes += fmt.Sprintf("\n\n> ⚠️ 以下文件 diff 过大（>%d tokens），本次未审查：%s",
+		notes += fmt.Sprintf("\n\n> ⚠️ 以下文件 diff 过大（>%d tokens）且无法按 hunk 拆分，本次未审查：%s",
 			maxFileDiffTokens, strings.Join(skipped, ", "))
 	}
 	if len(rawFailed) > 0 {
