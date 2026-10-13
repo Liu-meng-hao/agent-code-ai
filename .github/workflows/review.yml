@@ -20,13 +20,22 @@ jobs:
       contents: read
       pull-requests: write # 提交 review 评论所需
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0 # 拉取完整历史，保证能拿到 base/head 之间的 diff
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.26'
+
+      # 恢复按 PR 号隔离的增量审查缓存（记录已审查文件及其 blob hash）
+      - name: Restore review cache
+        uses: actions/cache@v5
+        with:
+          path: .ai-review-cache.json
+          key: ai-review-${{ github.event.pull_request.number }}-${{ github.sha }}
+          restore-keys: |
+            ai-review-${{ github.event.pull_request.number }}-
 
       - name: Run AI review
         env:

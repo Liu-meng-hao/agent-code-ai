@@ -14,3 +14,6 @@
 # 编辑器
 .idea/
 .vscode/
+
+# 增量审查缓存（由 actions/cache 保存，不入库）
+.ai-review-cache.json
