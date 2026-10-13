@@ -67,6 +67,12 @@ func run() error {
 		comments = append(comments, parsed...)
 	}
 
+	// 提交前先做字段合法性校验（方案 3.2），丢弃 severity/file/line 非法的意见
+	comments, dropped := ValidateComments(comments, files)
+	if dropped > 0 {
+		fmt.Printf("[ai-review] 丢弃 %d 条不合格意见（severity 非法、file 不在变更列表或 line 非正）\n", dropped)
+	}
+
 	// 按 diff 行号把评论分为可挂载到代码行的与无法定位的
 	valid := ParseDiffLines(strings.Join(batches, "\n"))
 	inline, orphan := SplitComments(comments, valid)

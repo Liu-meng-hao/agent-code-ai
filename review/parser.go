@@ -69,6 +69,32 @@ func normalizedSeverity(s string) string {
 	return s
 }
 
+// ValidateComments 在提交前过滤不合法的模型意见（方案 3.2）：
+//   - severity 不在枚举内 → 丢弃
+//   - file 为空或不在本次变更文件列表中 → 丢弃
+//   - line 不是正整数 → 丢弃
+//
+// 返回保留的意见与被丢弃的条数。这些意见即使提交也必然被 GitHub 拒绝或误导读者，故直接丢弃。
+func ValidateComments(comments []Comment, changedFiles []string) (valid []Comment, dropped int) {
+	changed := make(map[string]bool, len(changedFiles))
+	for _, f := range changedFiles {
+		changed[f] = true
+	}
+	for _, c := range comments {
+		c.File = strings.TrimSpace(c.File)
+		if _, ok := severitySet[c.Severity]; !ok {
+			dropped++
+			continue
+		}
+		if c.Line <= 0 || !changed[c.File] {
+			dropped++
+			continue
+		}
+		valid = append(valid, c)
+	}
+	return valid, dropped
+}
+
 // writeComments 把若干条评论按统一的 Markdown 标题格式写入 sb。
 func writeComments(sb *strings.Builder, comments []Comment) {
 	for _, c := range comments {

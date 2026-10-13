@@ -66,6 +66,30 @@ func TestNormalizedSeverity(t *testing.T) {
 	}
 }
 
+func TestValidateComments(t *testing.T) {
+	changed := []string{"a.go", "b/c.go"}
+	comments := []Comment{
+		{Severity: "high", File: "a.go", Line: 3, Issue: "ok"},
+		{Severity: "critical", File: " b/c.go ", Line: 10, Issue: "路径两端空白应被裁剪"},
+		{Severity: "HIGH", File: "a.go", Line: 3, Issue: "severity 非法"}, // 大小写不同即非法
+		{Severity: "high", File: "z.go", Line: 3, Issue: "file 不在变更列表"}, // 未变更文件
+		{Severity: "high", File: "", Line: 3, Issue: "file 为空"},         // 空 file
+		{Severity: "high", File: "a.go", Line: 0, Issue: "line 非正"},     // line<=0
+		{Severity: "low", File: "a.go", Line: -2, Issue: "line 为负"},     // line<0
+	}
+
+	valid, dropped := ValidateComments(comments, changed)
+	if dropped != 5 {
+		t.Errorf("应丢弃 5 条，实际 %d", dropped)
+	}
+	if len(valid) != 2 {
+		t.Fatalf("应保留 2 条，实际 %d: %+v", len(valid), valid)
+	}
+	if valid[0].File != "a.go" || valid[1].File != "b/c.go" {
+		t.Errorf("保留的意见不符: %+v", valid)
+	}
+}
+
 func TestFormatStatsFooter(t *testing.T) {
 	footer := FormatStatsFooter(ReviewStats{
 		Batches:      2,
