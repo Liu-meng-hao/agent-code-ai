@@ -96,6 +96,7 @@ func TestFormatStatsFooter(t *testing.T) {
 		Total:        3,
 		Inline:       2,
 		Orphan:       1,
+		CrossFile:    1,
 		Severity:     map[string]int{"critical": 1, "high": 2},
 		InputTokens:  1200,
 		OutputTokens: 300,
@@ -106,6 +107,7 @@ func TestFormatStatsFooter(t *testing.T) {
 		"调用 LLM：2 次",
 		"输入 1200，输出 300，合计 1500",
 		"意见：3 条（行内 2，正文 1）",
+		"跨文件影响意见：1 条（已并入正文）",
 		"critical 1，high 2",
 		"历史意见采纳：3/4 条获得 👍",
 	} {
@@ -119,8 +121,21 @@ func TestFormatStatsFooter(t *testing.T) {
 	if strings.Contains(none, "token 用量") {
 		t.Errorf("无用量数据时不应输出 token 行: %s", none)
 	}
+	// 无跨文件意见时不应输出跨文件行
+	if strings.Contains(none, "跨文件影响意见") {
+		t.Errorf("无跨文件意见时不应输出跨文件行: %s", none)
+	}
 	// 无历史评论时不应输出采纳行
 	if strings.Contains(none, "历史意见采纳") {
 		t.Errorf("无历史评论时不应输出采纳行: %s", none)
+	}
+}
+
+func TestFormatAsMarkdownCrossFileMarker(t *testing.T) {
+	out := FormatAsMarkdown([]Comment{
+		{Severity: "high", File: "b/b.go", Line: 5, CrossFile: true, Issue: "x"},
+	})
+	if !strings.Contains(out, "跨文件影响分析") {
+		t.Errorf("跨文件意见应标注来源: %s", out)
 	}
 }

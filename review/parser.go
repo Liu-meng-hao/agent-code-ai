@@ -14,6 +14,8 @@ type Comment struct {
 	Category   string `json:"category"`
 	Issue      string `json:"issue"`
 	Suggestion string `json:"suggestion"`
+	// CrossFile 标记该意见来自跨文件影响分析（文件未改动），仅进整体正文、不挂代码行。
+	CrossFile bool `json:"-"`
 }
 
 // ReviewResult 是模型约定的顶层 JSON 结构。
@@ -99,6 +101,9 @@ func ValidateComments(comments []Comment, changedFiles []string) (valid []Commen
 func writeComments(sb *strings.Builder, comments []Comment) {
 	for _, c := range comments {
 		fmt.Fprintf(sb, "### [%s] %s:%d\n\n", strings.ToUpper(normalizedSeverity(c.Severity)), escapeMarkdown(c.File), c.Line)
+		if c.CrossFile {
+			sb.WriteString("- 来源：跨文件影响分析（该文件本次未改动，受变更影响）\n")
+		}
 		if c.Category != "" {
 			fmt.Fprintf(sb, "- 分类：`%s`\n", escapeMarkdown(c.Category))
 		}
@@ -154,6 +159,7 @@ type ReviewStats struct {
 	Total        int            // 意见总数
 	Inline       int            // 可挂载到代码行的意见数
 	Orphan       int            // 无法定位到代码行的意见数
+	CrossFile    int            // 来自跨文件影响分析的意见数（已并入正文）
 	Severity     map[string]int // 各严重级的意见数
 	InputTokens  int64          // 输入 token 合计
 	OutputTokens int64          // 输出 token 合计
@@ -172,6 +178,9 @@ func FormatStatsFooter(s ReviewStats) string {
 			s.InputTokens, s.OutputTokens, s.InputTokens+s.OutputTokens)
 	}
 	fmt.Fprintf(&sb, "- 意见：%d 条（行内 %d，正文 %d）\n", s.Total, s.Inline, s.Orphan)
+	if s.CrossFile > 0 {
+		fmt.Fprintf(&sb, "- 跨文件影响意见：%d 条（已并入正文）\n", s.CrossFile)
+	}
 
 	var parts []string
 	for _, sev := range severityOrder {

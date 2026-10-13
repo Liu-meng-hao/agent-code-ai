@@ -17,6 +17,8 @@ git diff 拿变更文件 → 过滤低价值文件（lock/生成代码/vendor �
    ↓
 增量跳过：hunk 内容指纹未变的片段不再审查（actions/cache 按 PR 隔离）
    ↓
+跨文件影响分析：反向依赖的未改动文件做一次轻量审查（意见只进正文）
+   ↓
 按文件分片 + token 阈值 → 逐批调用 LLM
    ↓
 解析 JSON 输出 → 按 diff 行号拆分为「可挂行内」与「无法定位」
@@ -35,8 +37,11 @@ git diff 拿变更文件 → 过滤低价值文件（lock/生成代码/vendor �
 | `review/parser.go` | 解析模型 JSON 输出、渲染 Markdown、输出转义 |
 | `review/inline.go` | 解析 hunk 得到合法行号、拆分行内/整体评论 |
 | `review/cache.go` | 基于 hunk 内容指纹的增量审查缓存 |
+| `review/deps.go` | 解析 import 构建反向依赖，找出受变更影响的未改动文件 |
+| `review/crossfile.go` | 跨文件审查的上下文组装与 token 上限控制 |
 | `review/github.go` | 通过 `gh api` 提交 review（分批 + 逐条降级） |
 | `prompt/review.txt` | 审查用系统提示词 |
+| `prompt/crossfile.txt` | 跨文件影响分析用系统提示词 |
 | `.github/workflows/review.yml` | GitHub Actions 工作流 |
 
 ## 配置要求
@@ -85,9 +90,10 @@ go vet ./...
 - **增量**：按 hunk 内容指纹缓存，只把新增/变化的 hunk 送审，未变化的 hunk 跳过，避免重复评论与浪费 token（难点 5）。
 - **成本**：单文件变化部分超阈值时按 hunk 拆分为多片送审；多文件按 token 上限合批，避免单次调用超上下文（难点 1.3 / 7）。
 - **效果评估**：每次审查记录 token 用量、意见数与严重级分布；重跑时查询上一轮行内意见的 👍 reaction 统计采纳率（难点 10）。
+- **跨文件影响**：解析仓库内 Go 文件的 import 构建反向依赖，对「未改动但 import 了变更包」的文件做一次轻量审查（有上限的一次 LLM 调用）。这些文件不在 PR diff 内，意见无法挂代码行，统一并入整体正文并标注来源（难点 5 边界）。
 
 ## 已知局限
 
 - 增量审查为 **hunk 级**：hunk 内容或其所在行号发生变化（如上游改动导致行号偏移）时该 hunk 会重审。
-- 不做跨文件影响分析（依赖文件变更导致的问题可能漏报）。
+- 跨文件影响分析只覆盖**一层直接反向依赖**（不做传递依赖、正向依赖与同包兄弟文件）；受影响文件**只能进整体正文**、无法挂代码行；过大文件会被跳过；且仅对 Go 仓库生效（无 `go.mod` 时自动跳过）。
 - Fork PR 无法读取仓库 Secret，因此不会触发审查。

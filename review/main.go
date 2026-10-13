@@ -70,9 +70,17 @@ func run() error {
 		fmt.Printf("[ai-review] 丢弃 %d 条不合格意见（severity 非法、file 不在变更列表或 line 非正）\n", dropped)
 	}
 
+	// 跨文件影响分析：对「未改动但直接 import 了变更包」的文件做一次轻量审查（A 路线）。
+	// 这些文件不在 PR diff 内、无法挂代码行，意见统一并入整体正文。
+	crossComments, crossUsage, crossCalls := reviewCrossFile(cfg, batches, files)
+	totalUsage.Input += crossUsage.Input
+	totalUsage.Output += crossUsage.Output
+
 	// 按 diff 行号把评论分为可挂载到代码行的与无法定位的
 	valid := ParseDiffLines(strings.Join(batches, "\n"))
 	inline, orphan := SplitComments(comments, valid)
+	orphan = append(orphan, crossComments...) // 跨文件意见一律进正文
+	allComments := append(append([]Comment{}, comments...), crossComments...)
 
 	payloadComments := make([]reviewComment, 0, len(inline))
 	for _, c := range inline {
@@ -96,16 +104,17 @@ func run() error {
 
 	// 统计本次审查的成本与产出，附在正文末尾并写入日志（Phase 3E 效果评估）
 	severityCount := map[string]int{}
-	for _, c := range comments {
+	for _, c := range allComments {
 		severityCount[normalizedSeverity(c.Severity)]++
 	}
 	// 查询此前提交的 AI 意见的 👍 reaction，补齐「采纳率」维度（难点 10）
 	prevComments, adopted := CountAdoptions(cfg)
 	stats := ReviewStats{
-		Batches:      len(batches),
-		Total:        len(comments),
+		Batches:      len(batches) + crossCalls,
+		Total:        len(allComments),
 		Inline:       len(inline),
 		Orphan:       len(orphan),
+		CrossFile:    len(crossComments),
 		Severity:     severityCount,
 		InputTokens:  totalUsage.Input,
 		OutputTokens: totalUsage.Output,
@@ -114,11 +123,12 @@ func run() error {
 	}
 	statsFooter := FormatStatsFooter(stats)
 
-	inlineBody := FormatReviewBody(len(comments), len(inline), orphan) + notes + statsFooter
-	fullBody := FormatAsMarkdown(comments) + notes + statsFooter
-	fmt.Printf("[ai-review] 意见 %d 条：行内 %d 条，整体正文 %d 条\n", len(comments), len(inline), len(orphan))
+	inlineBody := FormatReviewBody(len(allComments), len(inline), orphan) + notes + statsFooter
+	fullBody := FormatAsMarkdown(allComments) + notes + statsFooter
+	fmt.Printf("[ai-review] 意见 %d 条：行内 %d 条，整体正文 %d 条（其中跨文件 %d 条）\n",
+		len(allComments), len(inline), len(orphan), len(crossComments))
 	fmt.Printf("[ai-review] token 用量：输入 %d，输出 %d，合计 %d；调用 LLM %d 次\n",
-		totalUsage.Input, totalUsage.Output, totalUsage.Input+totalUsage.Output, len(batches))
+		totalUsage.Input, totalUsage.Output, totalUsage.Input+totalUsage.Output, len(batches)+crossCalls)
 	if prevComments > 0 {
 		fmt.Printf("[ai-review] 历史意见采纳：%d/%d 条获得 👍\n", adopted, prevComments)
 	}
@@ -177,6 +187,55 @@ func printBody(body string) {
 	fmt.Println("[ai-review] ---- 本次生成的审查内容 ----")
 	fmt.Println(body)
 	fmt.Println("[ai-review] ---- 审查内容结束 ----")
+}
+
+// reviewCrossFile 执行跨文件影响分析：找出未改动但直接 import 了变更包的文件，
+// 连同本次变更一起交给 LLM 做一次受控的轻量审查，返回其中的意见、token 用量与调用次数。
+// 任一环节失败都只记录日志并返回空结果，不影响主流程（不阻塞 CI）。
+func reviewCrossFile(cfg *Config, batches, changedFiles []string) ([]Comment, Usage, int) {
+	prompt, err := os.ReadFile(crossFilePromptPath)
+	if err != nil {
+		fmt.Printf("[ai-review] 读取 %s 失败，跳过跨文件影响分析: %v\n", crossFilePromptPath, err)
+		return nil, Usage{}, 0
+	}
+
+	affected := affectedFiles(".", changedFiles)
+	if len(affected) == 0 {
+		fmt.Println("[ai-review] 无直接反向依赖的未改动文件，跳过跨文件影响分析")
+		return nil, Usage{}, 0
+	}
+
+	block, included := crossFileContext(".", affected)
+	if len(included) == 0 {
+		fmt.Println("[ai-review] 受影响文件内容均无法纳入，跳过跨文件影响分析")
+		return nil, Usage{}, 0
+	}
+	fmt.Printf("[ai-review] 跨文件影响分析：受影响未改动文件 %d 个，纳入 %d 个\n", len(affected), len(included))
+
+	userPrompt := buildCrossFileUserPrompt(crossFileDiffContext(batches), block)
+	raw, usage, err := ReviewWithLLM(cfg, string(prompt), userPrompt)
+	if err != nil {
+		fmt.Printf("[ai-review] 跨文件审查调用 LLM 失败，跳过: %v\n", err)
+		return nil, usage, 1
+	}
+	parsed, parseErr := ParseComments(raw)
+	if parseErr != nil {
+		fmt.Printf("[ai-review] 跨文件审查结果解析失败，跳过: %v\n", parseErr)
+		return nil, usage, 1
+	}
+	for i := range parsed {
+		parsed[i].CrossFile = true
+	}
+	// 允许的文件 = 变更文件 ∪ 实际纳入的受影响文件
+	allowed := append(append([]string{}, changedFiles...), included...)
+	valid, dropped := ValidateComments(parsed, allowed)
+	if dropped > 0 {
+		fmt.Printf("[ai-review] 跨文件审查丢弃 %d 条不合格意见（file 不在变更/受影响文件列表等）\n", dropped)
+	}
+	if len(valid) > 0 {
+		fmt.Printf("[ai-review] 跨文件审查产出意见 %d 条（已并入整体正文）\n", len(valid))
+	}
+	return valid, usage, 1
 }
 
 func buildUserPrompt(diff string) string {
