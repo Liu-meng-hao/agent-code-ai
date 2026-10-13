@@ -15,5 +15,6 @@ func FindUser(db *sql.DB, id int64) (string, error) {
 	if err := row.Scan(&name); err != nil {
 		return "", err
 	}
+	// run2：触发增量审查，验证历史意见采纳率统计
 	return fmt.Sprintf("user:%s", name), nil
 }
