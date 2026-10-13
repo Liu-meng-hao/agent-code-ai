@@ -136,6 +136,7 @@ func run() error {
 		Adopted:      adopted,
 	}
 	statsFooter := FormatStatsFooter(stats)
+	writeStepSummary(stats) // 同步写入 Actions Step Summary，便于定期回看与抽样评估（难点 10）
 
 	inlineBody := FormatReviewBody(len(allComments), len(inline), orphan) + notes + statsFooter
 	fullBody := FormatAsMarkdown(allComments) + notes + statsFooter
@@ -201,6 +202,45 @@ func printBody(body string) {
 	fmt.Println("[ai-review] ---- 本次生成的审查内容 ----")
 	fmt.Println(body)
 	fmt.Println("[ai-review] ---- 审查内容结束 ----")
+}
+
+// writeStepSummary 在 GitHub Actions 中把本次审查统计追加到 Step Summary，
+// 便于在 Actions 运行页定期回看与抽样评估（难点 10）。
+// 未在 Actions 中运行（无 GITHUB_STEP_SUMMARY）或写入失败时静默跳过，不影响审查。
+func writeStepSummary(stats ReviewStats) {
+	path := os.Getenv("GITHUB_STEP_SUMMARY")
+	if path == "" {
+		return
+	}
+	var sb strings.Builder
+	sb.WriteString("## 🤖 AI 审查统计\n\n")
+	fmt.Fprintf(&sb, "- 调用 LLM：%d 次\n", stats.Batches)
+	fmt.Fprintf(&sb, "- token 用量：输入 %d，输出 %d，合计 %d\n",
+		stats.InputTokens, stats.OutputTokens, stats.InputTokens+stats.OutputTokens)
+	fmt.Fprintf(&sb, "- 意见：%d 条（行内 %d，正文 %d，跨文件 %d）\n",
+		stats.Total, stats.Inline, stats.Orphan, stats.CrossFile)
+	var parts []string
+	for _, sev := range severityOrder {
+		if n := stats.Severity[sev]; n > 0 {
+			parts = append(parts, fmt.Sprintf("%s %d", sev, n))
+		}
+	}
+	if len(parts) > 0 {
+		fmt.Fprintf(&sb, "- 严重级分布：%s\n", strings.Join(parts, "，"))
+	}
+	if stats.PrevComments > 0 {
+		fmt.Fprintf(&sb, "- 历史意见采纳：%d/%d 条获得 👍\n", stats.Adopted, stats.PrevComments)
+	}
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		fmt.Printf("[ai-review] 写入 Step Summary 失败（不影响审查）: %v\n", err)
+		return
+	}
+	defer f.Close()
+	if _, err := f.WriteString(sb.String()); err != nil {
+		fmt.Printf("[ai-review] 写入 Step Summary 失败（不影响审查）: %v\n", err)
+	}
 }
 
 // reviewCrossFile 执行跨文件影响分析：找出未改动但直接 import 了变更包的文件，
