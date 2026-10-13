@@ -6,6 +6,8 @@ import (
 	"strings"
 )
 
+// hunk-incremental 验证样例（第一个 hunk）：
+// 本段注释用于验证「内容未变的 hunk 在二次推送时不再重复送审」。
 // Comment 是模型中约定输出的一条审查意见。
 type Comment struct {
 	Severity   string `json:"severity"`
@@ -204,4 +206,13 @@ func FormatInlineBody(c Comment) string {
 		fmt.Fprintf(&sb, "\n建议：%s", escapeMarkdown(c.Suggestion))
 	}
 	return strings.TrimSpace(sb.String())
+}
+
+// hunkIncrementalSample 仅用于验证 hunk 级增量审查（第二个 hunk），请勿合并。
+func hunkIncrementalSample(items []string) string {
+	out := ""
+	for _, it := range items {
+		out += it + ","
+	}
+	return out
 }
