@@ -65,3 +65,31 @@ func TestNormalizedSeverity(t *testing.T) {
 		t.Errorf("合法值应原样返回，实际 %q", got)
 	}
 }
+
+func TestFormatStatsFooter(t *testing.T) {
+	footer := FormatStatsFooter(ReviewStats{
+		Batches:      2,
+		Total:        3,
+		Inline:       2,
+		Orphan:       1,
+		Severity:     map[string]int{"critical": 1, "high": 2},
+		InputTokens:  1200,
+		OutputTokens: 300,
+	})
+	for _, want := range []string{
+		"调用 LLM：2 次",
+		"输入 1200，输出 300，合计 1500",
+		"意见：3 条（行内 2，正文 1）",
+		"critical 1，high 2",
+	} {
+		if !strings.Contains(footer, want) {
+			t.Errorf("统计信息缺少 %q，实际: %s", want, footer)
+		}
+	}
+
+	// 无 token 数据时应省略用量行，避免展示误导性的 0
+	none := FormatStatsFooter(ReviewStats{Total: 0})
+	if strings.Contains(none, "token 用量") {
+		t.Errorf("无用量数据时不应输出 token 行: %s", none)
+	}
+}

@@ -119,6 +119,45 @@ func FormatReviewBody(total, inlineCount int, orphan []Comment) string {
 	return sb.String()
 }
 
+// severityOrder 控制统计信息里严重级的展示顺序。
+var severityOrder = []string{"critical", "high", "medium", "low", "unknown"}
+
+// ReviewStats 汇总一次审查的成本与产出，用于效果评估。
+type ReviewStats struct {
+	Batches      int            // 调用 LLM 的批次数
+	Total        int            // 意见总数
+	Inline       int            // 可挂载到代码行的意见数
+	Orphan       int            // 无法定位到代码行的意见数
+	Severity     map[string]int // 各严重级的意见数
+	InputTokens  int64          // 输入 token 合计
+	OutputTokens int64          // 输出 token 合计
+}
+
+// FormatStatsFooter 渲染审查统计信息，附在 review 正文末尾，便于观察每次审查的成本与产出。
+// 内容由本流程生成而非模型输出，无需转义；折叠展示以免干扰审查意见本身。
+func FormatStatsFooter(s ReviewStats) string {
+	var sb strings.Builder
+	sb.WriteString("\n\n---\n\n<details><summary>📊 本次审查统计</summary>\n\n")
+	fmt.Fprintf(&sb, "- 调用 LLM：%d 次\n", s.Batches)
+	if s.InputTokens > 0 || s.OutputTokens > 0 {
+		fmt.Fprintf(&sb, "- token 用量：输入 %d，输出 %d，合计 %d\n",
+			s.InputTokens, s.OutputTokens, s.InputTokens+s.OutputTokens)
+	}
+	fmt.Fprintf(&sb, "- 意见：%d 条（行内 %d，正文 %d）\n", s.Total, s.Inline, s.Orphan)
+
+	var parts []string
+	for _, sev := range severityOrder {
+		if n := s.Severity[sev]; n > 0 {
+			parts = append(parts, fmt.Sprintf("%s %d", sev, n))
+		}
+	}
+	if len(parts) > 0 {
+		fmt.Fprintf(&sb, "- 严重级分布：%s\n", strings.Join(parts, "，"))
+	}
+	sb.WriteString("\n</details>")
+	return sb.String()
+}
+
 // FormatInlineBody 渲染单条行内评论的正文（挂载到代码行上）。
 func FormatInlineBody(c Comment) string {
 	var sb strings.Builder

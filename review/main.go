@@ -48,13 +48,16 @@ func run() error {
 	// 逐批调用 LLM，单批失败只跳过该批，不影响其他批次（难点 1.1 分片）
 	var comments []Comment
 	var rawFailed []string
+	var totalUsage Usage
 	for i, batch := range batches {
 		fmt.Printf("[ai-review] 审查第 %d/%d 批（约 %d tokens）\n", i+1, len(batches), estimateTokens(batch))
-		raw, err := ReviewWithLLM(cfg, string(systemPrompt), buildUserPrompt(batch))
+		raw, usage, err := ReviewWithLLM(cfg, string(systemPrompt), buildUserPrompt(batch))
 		if err != nil {
 			fmt.Printf("[ai-review] 第 %d 批调用 LLM 失败，跳过: %v\n", i+1, err)
 			continue
 		}
+		totalUsage.Input += usage.Input
+		totalUsage.Output += usage.Output
 		parsed, parseErr := ParseComments(raw)
 		if parseErr != nil {
 			fmt.Printf("[ai-review] 第 %d 批结构化解析失败，保留原文: %v\n", i+1, parseErr)
@@ -88,9 +91,27 @@ func run() error {
 		notes += "\n\n## ⚠️ 未能结构化解析的批次（原始输出）\n\n" + strings.Join(rawFailed, "\n\n---\n\n")
 	}
 
-	inlineBody := FormatReviewBody(len(comments), len(inline), orphan) + notes
-	fullBody := FormatAsMarkdown(comments) + notes
+	// 统计本次审查的成本与产出，附在正文末尾并写入日志（Phase 3E 效果评估）
+	severityCount := map[string]int{}
+	for _, c := range comments {
+		severityCount[normalizedSeverity(c.Severity)]++
+	}
+	stats := ReviewStats{
+		Batches:      len(batches),
+		Total:        len(comments),
+		Inline:       len(inline),
+		Orphan:       len(orphan),
+		Severity:     severityCount,
+		InputTokens:  totalUsage.Input,
+		OutputTokens: totalUsage.Output,
+	}
+	statsFooter := FormatStatsFooter(stats)
+
+	inlineBody := FormatReviewBody(len(comments), len(inline), orphan) + notes + statsFooter
+	fullBody := FormatAsMarkdown(comments) + notes + statsFooter
 	fmt.Printf("[ai-review] 意见 %d 条：行内 %d 条，整体正文 %d 条\n", len(comments), len(inline), len(orphan))
+	fmt.Printf("[ai-review] token 用量：输入 %d，输出 %d，合计 %d；调用 LLM %d 次\n",
+		totalUsage.Input, totalUsage.Output, totalUsage.Input+totalUsage.Output, len(batches))
 
 	if err := submitWithFallback(cfg, inlineBody, fullBody, payloadComments); err != nil {
 		return err
