@@ -41,3 +41,43 @@ func SubmitReview(cfg *Config, body string, comments []reviewComment) error {
 	}
 	return nil
 }
+
+// maxCommentsPerReview 单条 review 最多携带的行内评论数。意见过多时单次提交易被拒绝，
+// 因此按此上限分批提交（难点 4.4）。
+const maxCommentsPerReview = 50
+
+// submitBatched 把行内评论按 maxCommentsPerReview 分批，每批一条 review；
+// 整体正文只挂在第一批，后续批次不再重复正文。任一批失败即返回错误，由上层降级。
+func submitBatched(cfg *Config, body string, comments []reviewComment) error {
+	if len(comments) == 0 {
+		return SubmitReview(cfg, body, nil)
+	}
+	for i := 0; i < len(comments); i += maxCommentsPerReview {
+		end := i + maxCommentsPerReview
+		if end > len(comments) {
+			end = len(comments)
+		}
+		batchBody := body
+		if i > 0 {
+			batchBody = "（AI 代码审查，续）" // 后续批次不重复整体正文
+		}
+		if err := SubmitReview(cfg, batchBody, comments[i:end]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// submitIndividually 逐条提交行内评论：单条失败只记录日志、不影响其余（难点 3.3 降级）。
+// 返回成功与失败的条数。
+func submitIndividually(cfg *Config, comments []reviewComment) (ok, failed int) {
+	for _, c := range comments {
+		if err := SubmitReview(cfg, "", []reviewComment{c}); err != nil {
+			fmt.Printf("[ai-review] 单条评论提交失败（跳过）: %s:%d: %v\n", c.Path, c.Line, err)
+			failed++
+			continue
+		}
+		ok++
+	}
+	return ok, failed
+}

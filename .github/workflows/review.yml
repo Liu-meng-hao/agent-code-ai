@@ -3,18 +3,25 @@ name: AI Code Review
 on:
   pull_request:
     types: [opened, synchronize, ready_for_review]
+  # 手动触发：指定 PR 编号补跑一次审查（难点 9.2）
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: '要审查的 PR 编号'
+        required: true
 
 # 同一 PR 多次 push 时，取消旧 run，只保留最新一次（防抖）
 concurrency:
-  group: ai-review-${{ github.event.pull_request.number }}
+  group: ai-review-${{ github.event.pull_request.number || github.event.inputs.pr_number }}
   cancel-in-progress: true
 
 jobs:
   review:
-    # 跳过 draft PR，以及带 skip-review 标签的 PR
+    # 手动触发始终执行；PR 触发时跳过 draft PR 与带 skip-review 标签的 PR
     if: >-
-      github.event.pull_request.draft == false &&
-      !contains(github.event.pull_request.labels.*.name, 'skip-review')
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.draft == false &&
+      !contains(github.event.pull_request.labels.*.name, 'skip-review'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -28,21 +35,33 @@ jobs:
         with:
           go-version: '1.26'
 
+      # 手动触发时，事件里没有 PR 上下文，需要按 PR 编号查询 base/head SHA
+      - name: Resolve PR refs (manual trigger)
+        if: github.event_name == 'workflow_dispatch'
+        id: prrefs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.inputs.pr_number }}
+        run: |
+          echo "base_sha=$(gh api repos/$REPO/pulls/$PR --jq .base.sha)" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$(gh api repos/$REPO/pulls/$PR --jq .head.sha)" >> "$GITHUB_OUTPUT"
+
       # 恢复按 PR 号隔离的增量审查缓存（记录已审查文件及其 blob hash）
       - name: Restore review cache
         uses: actions/cache@v5
         with:
           path: .ai-review-cache.json
-          key: ai-review-${{ github.event.pull_request.number }}-${{ github.sha }}
+          key: ai-review-${{ github.event.pull_request.number || github.event.inputs.pr_number }}-${{ github.sha }}
           restore-keys: |
-            ai-review-${{ github.event.pull_request.number }}-
+            ai-review-${{ github.event.pull_request.number || github.event.inputs.pr_number }}-
 
       - name: Run AI review
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.inputs.pr_number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || steps.prrefs.outputs.base_sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.prrefs.outputs.head_sha }}
         run: go run ./review

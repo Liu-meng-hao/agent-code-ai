@@ -23,6 +23,20 @@ type ReviewResult struct {
 
 var severitySet = map[string]bool{"critical": true, "high": true, "medium": true, "low": true}
 
+// markdownEscaper 转义模型输出中的 HTML 危险字符。
+// 模型输出属于不可信内容，转义后可防止其注入 HTML/脚本或破坏评论的 Markdown 结构；
+// 渲染时用户仍然看到原始字符（如 <script> 会显示为字面量）。
+var markdownEscaper = strings.NewReplacer(
+	"&", "&amp;",
+	"<", "&lt;",
+	">", "&gt;",
+)
+
+// escapeMarkdown 对不可信的模型输出做 HTML 转义。
+func escapeMarkdown(s string) string {
+	return markdownEscaper.Replace(s)
+}
+
 // stripCodeFence 去掉模型可能包裹的 ```json ... ``` 代码块标记。
 func stripCodeFence(s string) string {
 	s = strings.TrimSpace(s)
@@ -58,15 +72,15 @@ func normalizedSeverity(s string) string {
 // writeComments 把若干条评论按统一的 Markdown 标题格式写入 sb。
 func writeComments(sb *strings.Builder, comments []Comment) {
 	for _, c := range comments {
-		fmt.Fprintf(sb, "### [%s] %s:%d\n\n", strings.ToUpper(normalizedSeverity(c.Severity)), c.File, c.Line)
+		fmt.Fprintf(sb, "### [%s] %s:%d\n\n", strings.ToUpper(normalizedSeverity(c.Severity)), escapeMarkdown(c.File), c.Line)
 		if c.Category != "" {
-			fmt.Fprintf(sb, "- 分类：`%s`\n", c.Category)
+			fmt.Fprintf(sb, "- 分类：`%s`\n", escapeMarkdown(c.Category))
 		}
 		if c.Issue != "" {
-			fmt.Fprintf(sb, "- 问题：%s\n", c.Issue)
+			fmt.Fprintf(sb, "- 问题：%s\n", escapeMarkdown(c.Issue))
 		}
 		if c.Suggestion != "" {
-			fmt.Fprintf(sb, "- 建议：%s\n", c.Suggestion)
+			fmt.Fprintf(sb, "- 建议：%s\n", escapeMarkdown(c.Suggestion))
 		}
 		sb.WriteString("\n")
 	}
@@ -110,14 +124,14 @@ func FormatInlineBody(c Comment) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "**[%s]**", strings.ToUpper(normalizedSeverity(c.Severity)))
 	if c.Category != "" {
-		fmt.Fprintf(&sb, " `%s`", c.Category)
+		fmt.Fprintf(&sb, " `%s`", escapeMarkdown(c.Category))
 	}
 	sb.WriteString("\n\n")
 	if c.Issue != "" {
-		sb.WriteString(c.Issue + "\n")
+		sb.WriteString(escapeMarkdown(c.Issue) + "\n")
 	}
 	if c.Suggestion != "" {
-		fmt.Fprintf(&sb, "\n建议：%s", c.Suggestion)
+		fmt.Fprintf(&sb, "\n建议：%s", escapeMarkdown(c.Suggestion))
 	}
 	return strings.TrimSpace(sb.String())
 }
