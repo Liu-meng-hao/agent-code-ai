@@ -73,3 +73,10 @@ func IgnoreErr() {
 	result, _ := fmt.Println("hello")
 	_ = result
 }
+
+// Retry 存在 off-by-one：循环会多执行一次，并且忽略了错误。
+func Retry(times int) {
+	for i := 0; i <= times; i++ {
+		_, _ = openFile("demo")
+	}
+}
