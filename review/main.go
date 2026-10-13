@@ -43,23 +43,56 @@ func run() error {
 		return fmt.Errorf("调用 LLM 失败: %w", err)
 	}
 
-	body := raw
-	if comments, parseErr := ParseComments(raw); parseErr != nil {
+	// 解析模型输出为结构化评论；失败则整体降级为原文提交
+	comments, parseErr := ParseComments(raw)
+	if parseErr != nil {
 		fmt.Printf("[ai-review] 结构化解析失败，降级为原文提交: %v\n", parseErr)
-		body = "## 🤖 AI 代码审查（原始输出）\n\n" + raw
-	} else {
-		body = FormatAsMarkdown(comments)
+		return submitWithFallback(cfg, "## 🤖 AI 代码审查（原始输出）\n\n"+raw, nil)
 	}
 
-	if err := SubmitReview(cfg, body); err != nil {
+	// 按 diff 行号把评论分为可挂载到代码行的与无法定位的
+	valid := ParseDiffLines(diff)
+	inline, orphan := SplitComments(comments, valid)
+
+	payloadComments := make([]reviewComment, 0, len(inline))
+	for _, c := range inline {
+		payloadComments = append(payloadComments, reviewComment{
+			Path: c.File,
+			Line: c.Line,
+			Side: "RIGHT",
+			Body: FormatInlineBody(c),
+		})
+	}
+
+	body := FormatReviewBody(len(comments), len(inline), orphan)
+	fmt.Printf("[ai-review] 意见 %d 条：行内 %d 条，整体正文 %d 条\n", len(comments), len(inline), len(orphan))
+	return submitWithFallback(cfg, body, payloadComments)
+}
+
+// submitWithFallback 先按「整体正文 + 行内评论」提交；失败则降级为仅整体正文（含全部意见）。
+// 无论成败都不返回错误（CI 不阻塞），最坏情况只打印审查正文。
+func submitWithFallback(cfg *Config, body string, comments []reviewComment) error {
+	if err := SubmitReview(cfg, body, comments); err == nil {
+		fmt.Println("[ai-review] 审查评论已提交")
+		return nil
+	} else {
+		fmt.Printf("[ai-review] 提交行内评论失败，降级为整体评论: %v\n", err)
+	}
+
+	if err := SubmitReview(cfg, body, nil); err != nil {
 		fmt.Printf("[ai-review] 提交评论失败: %v\n", err)
-		fmt.Println("[ai-review] ---- 本次生成的审查内容 ----")
-		fmt.Println(body)
-		fmt.Println("[ai-review] ---- 审查内容结束 ----")
+		printBody(body)
 		return nil // 不阻塞：提交失败不影响 CI
 	}
-	fmt.Println("[ai-review] 审查评论已提交")
+	fmt.Println("[ai-review] 审查评论已提交（降级整体模式）")
 	return nil
+}
+
+// printBody 在无法提交时把审查正文回显到日志，便于排查。
+func printBody(body string) {
+	fmt.Println("[ai-review] ---- 本次生成的审查内容 ----")
+	fmt.Println(body)
+	fmt.Println("[ai-review] ---- 审查内容结束 ----")
 }
 
 func buildUserPrompt(diff string) string {

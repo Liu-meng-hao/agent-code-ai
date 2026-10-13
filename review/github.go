@@ -7,16 +7,25 @@ import (
 	"os/exec"
 )
 
-// reviewPayload 是创建 PR review 的请求体。
-type reviewPayload struct {
-	Body  string `json:"body"`
-	Event string `json:"event"`
+// reviewComment 是挂在 diff 具体代码行上的行内评论。
+type reviewComment struct {
+	Path string `json:"path"`
+	Line int    `json:"line"`
+	Side string `json:"side"` // RIGHT=变更后（新文件）侧
+	Body string `json:"body"`
 }
 
-// SubmitReview 通过 gh api 提交一条整体 review 评论。
+// reviewPayload 是创建 PR review 的请求体。
+type reviewPayload struct {
+	Body     string          `json:"body"`
+	Event    string          `json:"event"`
+	Comments []reviewComment `json:"comments,omitempty"`
+}
+
+// SubmitReview 通过 gh api 提交一条 review：整体正文 + 可选的行内评论。
 // 使用 event=COMMENT，只提建议、不阻塞合并。
-func SubmitReview(cfg *Config, body string) error {
-	payload, err := json.Marshal(reviewPayload{Body: body, Event: "COMMENT"})
+func SubmitReview(cfg *Config, body string, comments []reviewComment) error {
+	payload, err := json.Marshal(reviewPayload{Body: body, Event: "COMMENT", Comments: comments})
 	if err != nil {
 		return err
 	}
