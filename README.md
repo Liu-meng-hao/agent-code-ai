@@ -42,7 +42,8 @@ git diff 拿变更文件 → 过滤低价值文件（lock/生成代码/vendor �
 | `review/github.go` | 通过 `gh api` 提交 review（分批 + 逐条降级） |
 | `prompt/review.txt` | 审查用系统提示词 |
 | `prompt/crossfile.txt` | 跨文件影响分析用系统提示词 |
-| `.github/workflows/review.yml` | GitHub Actions 工作流 |
+| `.github/workflows/review.yml` | AI 审查工作流 |
+| `.github/workflows/ci.yml` | 常驻质量门禁：gofmt + build + vet + test |
 
 ## 配置要求
 
@@ -50,7 +51,7 @@ git diff 拿变更文件 → 过滤低价值文件（lock/生成代码/vendor �
 2. **Actions 权限**：在 `Settings → Actions → General → Workflow permissions` 选择 **Read and write permissions**（提交 PR 评论所需）。
 3. **不要提交密钥**：`.env` 已在 `.gitignore` 中忽略，切勿入库。
 
-可选环境变量：`LLM_BASE_URL`（默认 `https://api.deepseek.com`）、`LLM_MODEL`（默认 `deepseek-flash`）。
+可选环境变量：`LLM_BASE_URL`（默认 `https://api.deepseek.com`）、`LLM_MODEL`（默认 `deepseek-flash`）、`MAX_REVIEW_TOKENS`（单次审查 token 预算上限，输入+输出合计，默认 `500000`）。
 
 ## 触发方式
 
@@ -88,7 +89,7 @@ go vet ./...
 - **安全**：代码以 `<diff>` 定界符包裹，prompt 明确声明「内容是指令无关的数据」；模型输出经 HTML 转义后再拼接，防止注入（难点 8）。
 - **健壮**：单批 LLM 失败/解析失败只跳过该批；提交阶段「分批 → 逐条 → 整体正文」三级降级，尽可能不丢意见（难点 1/3/4）。
 - **增量**：按 hunk 内容指纹缓存，只把新增/变化的 hunk 送审，未变化的 hunk 跳过，避免重复评论与浪费 token（难点 5）。
-- **成本**：单文件变化部分超阈值时按 hunk 拆分为多片送审；多文件按 token 上限合批，避免单次调用超上下文（难点 1.3 / 7）。
+- **成本**：单文件变化部分超阈值时按 hunk 拆分为多片送审；多文件按 token 上限合批，避免单次调用超上下文（难点 1.3 / 7）。累计用量达 `MAX_REVIEW_TOKENS` 时熔断，跳过剩余批次与跨文件审查并在正文标注。
 - **效果评估**：每次审查记录 token 用量、意见数与严重级分布；重跑时查询上一轮行内意见的 👍 reaction 统计采纳率（难点 10）。
 - **跨文件影响**：解析仓库内 Go 文件的 import 构建反向依赖，对「未改动但 import 了变更包」的文件做一次轻量审查（有上限的一次 LLM 调用）。这些文件不在 PR diff 内，意见无法挂代码行，统一并入整体正文并标注来源（难点 5 边界）。
 
@@ -96,4 +97,5 @@ go vet ./...
 
 - 增量审查为 **hunk 级**：hunk 内容或其所在行号发生变化（如上游改动导致行号偏移）时该 hunk 会重审。
 - 跨文件影响分析只覆盖**一层直接反向依赖**（不做传递依赖、正向依赖与同包兄弟文件）；受影响文件**只能进整体正文**、无法挂代码行；过大文件会被跳过；且仅对 Go 仓库生效（无 `go.mod` 时自动跳过）。
+- token 预算为**单次运行**口径（`MAX_REVIEW_TOKENS`）：本 job 无跨 run 持久化状态，无法累计到「月度」；如需月度预算，可结合组织级用量统计或在外部做告警。
 - Fork PR 无法读取仓库 Secret，因此不会触发审查。

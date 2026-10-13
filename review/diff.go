@@ -11,7 +11,12 @@ import (
 // lowValueSuffixes 改动量大但审查价值低的文件后缀，直接跳过以节省 token。
 var lowValueSuffixes = []string{
 	".lock", ".sum", ".min.js", ".min.css", ".pb.go", ".generated.go",
+	// 迁移 SQL（.up.sql / .down.sql）通常由框架生成、审查价值低；普通 .sql 仍会审查
+	".up.sql", ".down.sql",
 }
+
+// lowValueDirs 跳过整个目录：第三方依赖、构建产物，以及数据库迁移脚本目录。
+var lowValueDirs = []string{"vendor", "node_modules", "dist", "build", "migrations", "migration"}
 
 // lowValueNames 常见的依赖锁文件。
 var lowValueNames = map[string]bool{
@@ -35,7 +40,7 @@ func isLowValueFile(path string) bool {
 		}
 	}
 	lower := strings.ToLower(path)
-	for _, dir := range []string{"vendor", "node_modules", "dist", "build"} {
+	for _, dir := range lowValueDirs {
 		// 匹配仓库根目录（如 node_modules/x）与任意层级（如 a/vendor/x）
 		if strings.HasPrefix(lower, dir+"/") || strings.Contains(lower, "/"+dir+"/") {
 			return true

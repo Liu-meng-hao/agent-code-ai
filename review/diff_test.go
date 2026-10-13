@@ -24,13 +24,14 @@ func TestIsLowValueFile(t *testing.T) {
 	lowValue := []string{
 		"go.sum", "package-lock.json", "web/app.min.js",
 		"api/foo.pb.go", "node_modules/x/index.js",
+		"db/migrations/001_init.sql", "migrations/002_add.up.sql", "schema/x.down.sql",
 	}
 	for _, f := range lowValue {
 		if !isLowValueFile(f) {
 			t.Errorf("%s 应被判定为低价值文件", f)
 		}
 	}
-	keep := []string{"review/main.go", "README.md", "internal/service.go"}
+	keep := []string{"review/main.go", "README.md", "internal/service.go", "queries/report.sql"}
 	for _, f := range keep {
 		if isLowValueFile(f) {
 			t.Errorf("%s 不应被判定为低价值文件", f)
