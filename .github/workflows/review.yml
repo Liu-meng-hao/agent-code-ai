@@ -1,7 +1,12 @@
 name: AI Code Review
 
 on:
+  # 内部 PR（同仓库分支）：走 pull_request
   pull_request:
+    types: [opened, synchronize, ready_for_review]
+  # fork PR：pull_request 事件读不到仓库 Secret，改由 pull_request_target 在 base 仓库上下文运行
+  # 安全红线：只读取 fork 的 diff 数据送审，绝不 checkout / 执行 fork 的代码
+  pull_request_target:
     types: [opened, synchronize, ready_for_review]
   # 手动触发：指定 PR 编号补跑一次审查（难点 9.2）
   workflow_dispatch:
@@ -11,17 +16,22 @@ on:
         required: true
 
 # 同一 PR 多次 push 时，取消旧 run，只保留最新一次（防抖）
+# 组名带上事件名：fork PR 会同时产生 pull_request 与 pull_request_target 两条 run，
+# 若共用一组，空跑的 pull_request run 会取消掉真正在跑的 pull_request_target run
 concurrency:
-  group: ai-review-${{ github.event.pull_request.number || github.event.inputs.pr_number }}
+  group: ai-review-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.inputs.pr_number }}
   cancel-in-progress: true
 
 jobs:
   review:
-    # 手动触发始终执行；PR 触发时跳过 draft PR 与带 skip-review 标签的 PR
+    # 手动触发始终执行；PR 触发时跳过 draft PR 与带 skip-review 标签的 PR，
+    # 并按来源分流：内部 PR 走 pull_request，fork PR 走 pull_request_target
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.draft == false &&
-      !contains(github.event.pull_request.labels.*.name, 'skip-review'))
+      !contains(github.event.pull_request.labels.*.name, 'skip-review') &&
+      ((github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository) ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -30,6 +40,16 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0 # 拉取完整历史，保证能拿到 base/head 之间的 diff
+
+      # fork PR 走 pull_request_target / 手动触发时，检出的都是默认分支，PR 的 head commit
+      # （在 fork 仓库里）不在本地：需显式把 base 仓库中的 refs/pull/<N>/head 拉到本地，
+      # 本地 git diff 才算得出来（内部 PR 走 pull_request 时本就有该 commit，此步只是冗余无害）。
+      # 此步只取数据（不执行其中任何代码），符合「不执行不可信代码」的安全红线。
+      - name: Fetch PR head (data only)
+        if: github.event_name != 'pull_request'
+        env:
+          PR: ${{ github.event.pull_request.number || github.event.inputs.pr_number }}
+        run: git fetch --no-tags origin "+refs/pull/$PR/head:refs/remotes/origin/pr-head"
 
       - uses: actions/setup-go@v6
         with:

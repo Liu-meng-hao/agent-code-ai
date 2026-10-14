@@ -55,10 +55,18 @@ git diff 拿变更文件 → 过滤低价值文件（lock/生成代码/vendor �
 
 ## 触发方式
 
-- **自动**：`pull_request` 的 `opened` / `synchronize` / `ready_for_review`
+- **自动（内部 PR）**：同仓库分支提 PR，走 `pull_request` 的 `opened` / `synchronize` / `ready_for_review`
+- **自动（fork PR）**：外部 fork 提的 PR 走 `pull_request_target`，在 base 仓库上下文运行（`pull_request` 事件读不到仓库 Secret）；按事件来源分流，两类 PR 各走各的，互不影响
 - **手动**：`Actions → AI Code Review → Run workflow`，填写要审查的 `pr_number`
 - **跳过**：给 PR 打上 `skip-review` 标签，或保持 draft 状态
 - **防抖**：同一 PR 多次 push 只保留最新一次 run
+
+## fork PR 的安全边界
+
+`pull_request_target` 在 **base 仓库上下文**运行，工作流定义取自默认分支（fork 改不动它），因此能读到 `DEEPSEEK_API_KEY` 并持有写权限 token。执行时遵守两条红线：
+
+- **绝不 checkout / 执行 fork 的代码**：只 `git fetch` base 仓库里的 `refs/pull/<N>/head` 拿到 diff 数据，本地算 diff 送审；运行的始终是默认分支上的审查代码。
+- **fork 的 diff 内容视为不可信数据**：仅作为数据送 LLM，提示词里已用 `<diff>` 定界声明「与指令无关」，模型输出再经 HTML 转义后才拼接，因此恶意 diff 只能尝试 prompt 注入，无法借写权限执行任意操作。
 
 ## 本地测试
 
@@ -118,4 +126,4 @@ env:
 - 增量审查为 **hunk 级**：hunk 内容或其所在行号发生变化（如上游改动导致行号偏移）时该 hunk 会重审。
 - 跨文件影响分析只覆盖**一层直接反向依赖**（不做传递依赖、正向依赖与同包兄弟文件）；受影响文件**只能进整体正文**、无法挂代码行；过大文件会被跳过；且仅对 Go 仓库生效（无 `go.mod` 时自动跳过）。
 - token 预算为**单次运行**口径（`MAX_REVIEW_TOKENS`）：本 job 无跨 run 持久化状态，无法累计到「月度」；如需月度预算，可结合组织级用量统计或在外部做告警。
-- Fork PR 无法读取仓库 Secret，因此不会触发审查。
+- Fork PR 由 `pull_request_target` 承接，可正常审查（见上文「fork PR 的安全边界」）；代价是审查运行在 base 仓库上下文并持有写权限 token，依赖「不执行 fork 代码 + 不信任 fork 内容」这两条红线，因此**不要**在该工作流里新增任何会 checkout/执行 PR head 的步骤。
