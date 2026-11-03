@@ -42,28 +42,43 @@ func run() error {
 	}
 	fmt.Printf("[ai-review] 变更文件 %d 个，本次待审查 %d 批；跳过超大文件 %d 个\n", len(files), len(batches), len(skipped))
 
-	// 逐批调用 LLM，单批失败只跳过该批，不影响其他批次（难点 1.1 分片）
+	// 初始化 MCP 工具箱（方案二）：启动所有 server、注册工具；失败降级为无工具
+	// 未配置 .mcp.json 或所有 server 都起不来时，reg.enabled=false，LLMToolLoop 自动退化为单次调用
+	mcpReg := initMCPServers(cfg)
+	defer closeMCPServers(mcpReg)
+
+	// 逐批调用 LLM（方案二：LLMToolLoop 多轮 tool calling 循环；无工具箱时退化为单次调用）
 	var comments []Comment
 	var rawFailed []string
 	var totalUsage Usage
-	calls := 0
+	var totalLLMCalls int // 所有 batch 的 Chat Completions 调用轮数之和（供统计）
 	budgetSkipped := 0
 	for i, batch := range batches {
-		// 预算熔断（难点 7）：累计用量达上限即停止后续调用，避免大 PR 无上限烧 token
+		// 预算熔断（难点 7）：累计用量达上限即停止后续调用
 		if totalUsage.Input+totalUsage.Output >= cfg.MaxReviewTokens {
 			budgetSkipped = len(batches) - i
 			fmt.Printf("[ai-review] 已达本次审查 token 预算上限（%d），跳过剩余 %d 批\n", cfg.MaxReviewTokens, budgetSkipped)
 			break
 		}
-		fmt.Printf("[ai-review] 审查第 %d/%d 批（约 %d tokens）\n", i+1, len(batches), estimateTokens(batch))
-		raw, usage, err := ReviewWithLLM(cfg, string(systemPrompt), buildUserPrompt(batch))
-		calls++
-		if err != nil {
-			fmt.Printf("[ai-review] 第 %d 批调用 LLM 失败，跳过: %v\n", i+1, err)
+		// 单批相对预算：剩余预算均摊到剩余 batch，避免一个大 batch 占光
+		remainingBatches := int64(len(batches) - i)
+		perBatchBudget := (cfg.MaxReviewTokens - totalUsage.Input - totalUsage.Output) / remainingBatches
+		fmt.Printf("[ai-review] 审查第 %d/%d 批（约 %d tokens，单批预算 %d）\n", i+1, len(batches), estimateTokens(batch), perBatchBudget)
+		userPrompt := buildUserPrompt(batch)
+
+		maxRounds := cfg.MaxToolRounds
+		if mcpReg == nil || !mcpReg.enabled {
+			maxRounds = 1 // 无工具箱 → 强制单轮
+		}
+		raw, batchUsage, rounds, loopErr := LLMToolLoop(cfg, string(systemPrompt), userPrompt, mcpReg, maxRounds, perBatchBudget)
+		totalLLMCalls += rounds
+
+		if loopErr != nil {
+			fmt.Printf("[ai-review] 第 %d 批 LLM 调用失败，跳过: %v\n", i+1, loopErr)
 			continue
 		}
-		totalUsage.Input += usage.Input
-		totalUsage.Output += usage.Output
+		totalUsage.Input += batchUsage.Input
+		totalUsage.Output += batchUsage.Output
 		parsed, parseErr := ParseComments(raw)
 		if parseErr != nil {
 			fmt.Printf("[ai-review] 第 %d 批结构化解析失败，保留原文: %v\n", i+1, parseErr)
@@ -124,7 +139,7 @@ func run() error {
 	// 查询此前提交的 AI 意见的 👍 reaction，补齐「采纳率」维度（难点 10）
 	prevComments, adopted := CountAdoptions(cfg)
 	stats := ReviewStats{
-		Batches:      calls + crossCalls,
+		Batches:      totalLLMCalls + crossCalls,
 		Total:        len(allComments),
 		Inline:       len(inline),
 		Orphan:       len(orphan),
@@ -142,8 +157,8 @@ func run() error {
 	fullBody := FormatAsMarkdown(allComments) + notes + statsFooter
 	fmt.Printf("[ai-review] 意见 %d 条：行内 %d 条，整体正文 %d 条（其中跨文件 %d 条）\n",
 		len(allComments), len(inline), len(orphan), len(crossComments))
-	fmt.Printf("[ai-review] token 用量：输入 %d，输出 %d，合计 %d（预算 %d）；调用 LLM %d 次\n",
-		totalUsage.Input, totalUsage.Output, totalUsage.Input+totalUsage.Output, cfg.MaxReviewTokens, calls+crossCalls)
+	fmt.Printf("[ai-review] token 用量：输入 %d，输出 %d，合计 %d（预算 %d）；Chat Completions 调用 %d 次（含 tool 循环 %d 轮）\n",
+		totalUsage.Input, totalUsage.Output, totalUsage.Input+totalUsage.Output, cfg.MaxReviewTokens, totalLLMCalls+crossCalls, totalLLMCalls)
 	if prevComments > 0 {
 		fmt.Printf("[ai-review] 历史意见采纳：%d/%d 条获得 👍\n", adopted, prevComments)
 	}
@@ -304,3 +319,6 @@ func buildUserPrompt(diff string) string {
 		"<diff>\n" + diff + "\n</diff>\n\n" +
 		"请严格按约定 JSON 格式输出审查意见。"
 }
+
+
+//这是一段测试代码

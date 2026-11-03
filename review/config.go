@@ -20,7 +20,10 @@ type Config struct {
 	PRNumber        string // PR 编号
 	BaseSHA         string // PR 基准 commit
 	HeadSHA         string // PR 最新 commit
-	MaxReviewTokens int64  // 单次审查 token 预算上限（输入+输出），超限即熔断跳过剩余调用
+	MaxReviewTokens  int64    // 单次审查 token 预算上限（输入+输出），超限即熔断跳过剩余调用
+	MCPConfigPath    string   // MCP 配置文件路径（mcpServers JSON）；文件不存在则禁用 MCP
+	MaxToolRounds    int      // 单批 tool 循环最大轮数（方案二），默认 5；MCP 未启用时退化为 1
+	MCPAllowedTools  []string // 工具白名单（分号分隔）；为空时仅硬编码屏蔽写操作类工具
 }
 
 // LoadConfig 从环境变量读取配置，缺失必需项时返回错误。
@@ -33,6 +36,9 @@ func LoadConfig() (*Config, error) {
 		BaseSHA:         os.Getenv("BASE_SHA"),
 		HeadSHA:         os.Getenv("HEAD_SHA"),
 		MaxReviewTokens: envInt64("MAX_REVIEW_TOKENS", defaultMaxReviewTokens),
+		MCPConfigPath:   envOr("MCP_CONFIG_PATH", ".mcp.json"),
+		MaxToolRounds:   envInt("MAX_TOOL_ROUNDS", 5),
+		MCPAllowedTools: splitNonEmpty(envOr("MCP_ALLOWED_TOOLS", ""), ";"),
 	}
 
 	// GITHUB_REPOSITORY 形如 "owner/repo"，由 GitHub Actions 自动注入
@@ -77,4 +83,24 @@ func envInt64(key string, def int64) int64 {
 		}
 	}
 	return def
+}
+
+// envInt 读取正整数型环境变量，返回 int（未设置或非法时返回默认值）。
+func envInt(key string, def int) int {
+	return int(envInt64(key, int64(def)))
+}
+
+// splitNonEmpty 按分隔符拆分字符串，过滤掉空片段。
+func splitNonEmpty(s, sep string) []string {
+	if s == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(s, sep) {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
