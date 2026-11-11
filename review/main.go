@@ -51,7 +51,8 @@ func run() error {
 	var comments []Comment
 	var rawFailed []string
 	var totalUsage Usage
-	var totalLLMCalls int // 所有 batch 的 Chat Completions 调用轮数之和（供统计）
+	var totalLLMCalls int      // 所有 batch 的 Chat Completions 调用轮数之和（供统计）
+	var priorFindings []string // 前序批次已产出意见的紧凑摘要，作为后续批次的显式记忆
 	budgetSkipped := 0
 	for i, batch := range batches {
 		// 预算熔断（难点 7）：累计用量达上限即停止后续调用
@@ -70,15 +71,16 @@ func run() error {
 		if mcpReg == nil || !mcpReg.enabled {
 			maxRounds = 1 // 无工具箱 → 强制单轮
 		}
-		raw, batchUsage, rounds, loopErr := LLMToolLoop(cfg, string(systemPrompt), userPrompt, mcpReg, maxRounds, perBatchBudget)
+		priorText, priorUsage := formatPriorFindings(cfg, priorFindings)
+		raw, batchUsage, rounds, loopErr := LLMToolLoop(cfg, string(systemPrompt), userPrompt, mcpReg, maxRounds, perBatchBudget, priorText)
 		totalLLMCalls += rounds
 
 		if loopErr != nil {
 			fmt.Printf("[ai-review] 第 %d 批 LLM 调用失败，跳过: %v\n", i+1, loopErr)
 			continue
 		}
-		totalUsage.Input += batchUsage.Input
-		totalUsage.Output += batchUsage.Output
+		totalUsage.Input += batchUsage.Input + priorUsage.Input
+		totalUsage.Output += batchUsage.Output + priorUsage.Output
 		parsed, parseErr := ParseComments(raw)
 		if parseErr != nil {
 			fmt.Printf("[ai-review] 第 %d 批结构化解析失败，保留原文: %v\n", i+1, parseErr)
@@ -86,6 +88,28 @@ func run() error {
 			continue
 		}
 		comments = append(comments, parsed...)
+		for _, c := range parsed {
+			if severitySet[c.Severity] && c.File != "" && c.Line > 0 {
+				priorFindings = append(priorFindings, formatFindingLine(c))
+			}
+		}
+
+		// 主动压缩：预算剩余不足 30% 且 findings 足够多、尚未压缩过时，在循环中途压一次，
+		// 把省下来的 token 空间留给后续批次的 diff 和 tool 调用。
+		if len(priorFindings) >= minPriorFindingsToCompact &&
+			!strings.HasPrefix(priorFindings[0], compactedPrefix) {
+			used := totalUsage.Input + totalUsage.Output
+			remainingPct := float64(cfg.MaxReviewTokens-used) / float64(cfg.MaxReviewTokens)
+			if remainingPct < compactBudgetThresholdPct {
+				text := strings.Join(priorFindings, "\n")
+				compacted, compUsage := compactPriorFindings(cfg, text)
+				totalUsage.Input += compUsage.Input
+				totalUsage.Output += compUsage.Output
+				fmt.Printf("[ai-review] 预算剩余 %.0f%%，主动把 %d 条记忆压到约 %d tokens\n",
+					remainingPct*100, len(priorFindings), estimateTokens(compacted))
+				priorFindings = []string{compactedPrefix + compacted}
+			}
+		}
 	}
 
 	// 提交前先做字段合法性校验（方案 3.2），丢弃 severity/file/line 非法的意见
@@ -320,5 +344,77 @@ func buildUserPrompt(diff string) string {
 		"请严格按约定 JSON 格式输出审查意见。"
 }
 
+// 批间记忆（priorFindings）的阈值与压缩常量。
+const (
+	maxPriorFindings          = 40   // 压缩前的条数上限（粗粒度截断）
+	priorFindingsTokenBudget  = 1500 // 单批注入的 priorFindings token 估算上限，超了触发 LLM 压缩
+	compactBudgetThresholdPct = 0.30 // 预算剩余低于该比例时，在批循环中途主动压一次 priorFindings
+	minPriorFindingsToCompact = 8    // 至少积累这么多条才值得触发 LLM 压缩（压缩本身有成本）
+	compactedPrefix           = "[记忆摘要] "
+)
 
-//这是一段测试代码
+// formatPriorFindings 把前序批次的意见摘要拼成可直接注入 prompt 的文本。
+// 与旧版（只按条数截断）的区别：超 priorFindingsTokenBudget 时自动调用 LLM 压缩，
+// 压缩失败或压缩后反而更大则退回原文 + 粗粒度按 token 截断。
+// 返回值包含压缩本身的 LLM 用量，由调用方统一计入 totalUsage。
+func formatPriorFindings(cfg *Config, findings []string) (string, Usage) {
+	if len(findings) == 0 {
+		return "", Usage{}
+	}
+	// 已经压缩过 → 压缩摘要在前，最多再追加 20 条新产生的意见，避免反复膨胀
+	if strings.HasPrefix(findings[0], compactedPrefix) {
+		out := findings[0]
+		tail := findings[1:]
+		if len(tail) > 20 {
+			tail = tail[len(tail)-20:]
+		}
+		if len(tail) > 0 {
+			out += "\n" + strings.Join(tail, "\n")
+		}
+		return out, Usage{}
+	}
+	// 条数上限（压缩前的粗粒度截断，避免 findings 太长导致压缩调用本身 token 爆炸）
+	if len(findings) > maxPriorFindings {
+		findings = findings[len(findings)-maxPriorFindings:]
+	}
+	text := strings.Join(findings, "\n")
+	tokens := estimateTokens(text)
+	if int64(tokens) <= priorFindingsTokenBudget {
+		return text, Usage{} // 足够小，直接用
+	}
+	// 触发 LLM 压缩
+	compacted, usage := compactPriorFindings(cfg, text)
+	if estimateTokens(compacted) >= tokens {
+		// 压缩后 token 估算反而更大 → 放弃压缩，按 token 数粗略截断
+		return truncateByTokens(text, priorFindingsTokenBudget), Usage{}
+	}
+	return compactedPrefix + compacted, usage
+}
+
+// truncateByTokens 按估算 token 数粗略截断文本（保守：优先保留开头）。
+// 仅作为 LLM 压缩失败后的兜底路径。
+func truncateByTokens(s string, maxTokens int64) string {
+	estimated := int64(estimateTokens(s))
+	if estimated <= maxTokens {
+		return s
+	}
+	ratio := float64(maxTokens) / float64(estimated)
+	r := []rune(s)
+	cut := int(float64(len(r)) * ratio)
+	if cut < 20 {
+		cut = 20
+	}
+	if cut >= len(r) {
+		return s
+	}
+	return string(r[:cut]) + "\n... (记忆过长已截断)"
+}
+
+// formatFindingLine 把一条意见压缩成「- [severity] file:line 首行问题」的紧凑摘要。
+func formatFindingLine(c Comment) string {
+	issue := strings.TrimSpace(strings.SplitN(c.Issue, "\n", 2)[0])
+	if r := []rune(issue); len(r) > 80 {
+		issue = string(r[:80]) + "…"
+	}
+	return fmt.Sprintf("- [%s] %s:%d %s", normalizedSeverity(c.Severity), c.File, c.Line, issue)
+}

@@ -2,44 +2,17 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
-// TestExpandMCPValue 验证 ${VAR} 插值：整体替换时还原 JSON 类型，嵌入拼接时保持字符串。
-func TestExpandMCPValue(t *testing.T) {
-	vars := map[string]string{"PR_NUMBER": "123", "OWNER": "octo"}
-	t.Setenv("MCP_TEST_FLAG", "true")
-
-	tests := []struct {
-		name string
-		in   any
-		want any
-	}{
-		{"整体数字还原", "${PR_NUMBER}", int64(123)},
-		{"整体布尔还原", "${MCP_TEST_FLAG}", true},
-		{"整体字符串", "${OWNER}", "octo"},
-		{"嵌入拼接保持字符串", "repos/${OWNER}/repo", "repos/octo/repo"},
-		{"未定义变量展开为空", "${NO_SUCH_VAR}", ""},
-		{"非字符串原样保留", float64(42), float64(42)},
-		{"嵌套 map", map[string]any{"a": "${PR_NUMBER}"}, map[string]any{"a": int64(123)}},
-		{"嵌套 slice", []any{"${OWNER}", "x"}, []any{"octo", "x"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := expandMCPValue(tt.in, vars)
-			if fmt.Sprintf("%v(%T)", got, got) != fmt.Sprintf("%v(%T)", tt.want, tt.want) {
-				t.Errorf("expandMCPValue(%v) = %v(%T)，期望 %v(%T)", tt.in, got, got, tt.want, tt.want)
-			}
-		})
-	}
-}
-
-// TestLoadMCPConfig 验证配置文件的解析与变量插值。
+// TestLoadMCPConfig 验证 server 配置的解析与 ${VAR} 插值。
 func TestLoadMCPConfig(t *testing.T) {
 	// 文件不存在 → (nil, nil)，表示 MCP 未启用
 	cfg, err := LoadMCPConfig(filepath.Join(t.TempDir(), "nonexistent.json"), nil)
@@ -53,25 +26,16 @@ func TestLoadMCPConfig(t *testing.T) {
 		"mcpServers": {
 			"github": {
 				"command": "npx",
-				"args": ["-y", "@modelcontextprotocol/server-github"],
+				"args": ["-y", "@modelcontextprotocol/server-github", "${OWNER}/repo"],
 				"env": { "GITHUB_TOKEN": "${MCP_TEST_TOKEN}" }
 			}
-		},
-		"context": [
-			{
-				"title": "PR 详情",
-				"server": "github",
-				"tool": "get_pull_request",
-				"args": { "owner": "${OWNER}", "pullNumber": "${PR_NUMBER}" }
-			}
-		]
+		}
 	}`
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	vars := map[string]string{"OWNER": "octo", "PR_NUMBER": "123"}
-	cfg, err = LoadMCPConfig(path, vars)
+	cfg, err = LoadMCPConfig(path, map[string]string{"OWNER": "octo"})
 	if err != nil {
 		t.Fatalf("解析失败: %v", err)
 	}
@@ -79,38 +43,84 @@ func TestLoadMCPConfig(t *testing.T) {
 		t.Fatal("配置存在时不应返回 nil")
 	}
 	srv := cfg.Servers["github"]
-	if srv.Command != "npx" || len(srv.Args) != 2 || srv.Args[1] != "@modelcontextprotocol/server-github" {
-		t.Errorf("server 配置解析错误: %+v", srv)
+	if srv.Command != "npx" || len(srv.Args) != 3 || srv.Args[2] != "octo/repo" {
+		t.Errorf("server 配置解析/插值错误: %+v", srv)
 	}
 	if srv.Env["GITHUB_TOKEN"] != "secret-token" {
 		t.Errorf("env 插值失败: %q", srv.Env["GITHUB_TOKEN"])
 	}
-	if len(cfg.Context) != 1 {
-		t.Fatalf("context 应有 1 条，实际 %d", len(cfg.Context))
+}
+
+// TestShouldExposeTool 验证白名单 > annotations > 工具名分词兜底的暴露规则。
+func TestShouldExposeTool(t *testing.T) {
+	readOnly, destructive := true, true
+	tests := []struct {
+		name    string
+		tool    mcpToolDef
+		allowed []string
+		want    bool
+	}{
+		{"只读工具默认放行", mcpToolDef{Name: "read_file"}, nil, true},
+		{"写操作工具默认屏蔽", mcpToolDef{Name: "delete_file"}, nil, false},
+		{"分词避免子串误杀", mcpToolDef{Name: "get_input"}, nil, true},
+		{"驼峰分词识别写操作", mcpToolDef{Name: "deleteFile"}, nil, false},
+		{"注解 readOnly 放行", mcpToolDef{Name: "write_report", Annotations: &mcpToolAnnotations{ReadOnlyHint: &readOnly}}, nil, true},
+		{"注解 destructive 拒绝", mcpToolDef{Name: "peek", Annotations: &mcpToolAnnotations{DestructiveHint: &destructive}}, nil, false},
+		{"白名单命中优先", mcpToolDef{Name: "delete_file"}, []string{"delete_file"}, true},
+		{"白名单非空未命中则过滤", mcpToolDef{Name: "read_file"}, []string{"write_file"}, false},
 	}
-	call := cfg.Context[0]
-	if call.Args["owner"] != "octo" {
-		t.Errorf("owner 插值失败: %v", call.Args["owner"])
-	}
-	if n, ok := call.Args["pullNumber"].(int64); !ok || n != 123 {
-		t.Errorf("pullNumber 应还原为 int64(123)，实际 %v(%T)", call.Args["pullNumber"], call.Args["pullNumber"])
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldExposeTool(tt.tool, tt.allowed); got != tt.want {
+				t.Errorf("shouldExposeTool(%s) = %v，期望 %v", tt.tool.Name, got, tt.want)
+			}
+		})
 	}
 }
 
-// TestCollectMCPContextDisabled 验证未配置 / 配置不存在时静默降级为空。
-func TestCollectMCPContextDisabled(t *testing.T) {
-	if got := collectMCPContext(&Config{MCPConfigPath: ""}); got != "" {
-		t.Errorf("MCPConfigPath 为空应返回空串，实际 %q", got)
+// TestValidateToolArgs 验证转发前的 required / 类型 / enum 校验。
+func TestValidateToolArgs(t *testing.T) {
+	schema := map[string]any{
+		"type":     "object",
+		"required": []any{"path"},
+		"properties": map[string]any{
+			"path":  map[string]any{"type": "string"},
+			"limit": map[string]any{"type": "integer"},
+			"mode":  map[string]any{"type": "string", "enum": []any{"read", "rw"}},
+		},
+		"additionalProperties": false,
 	}
-	cfg := &Config{MCPConfigPath: filepath.Join(t.TempDir(), "nonexistent.json")}
-	if got := collectMCPContext(cfg); got != "" {
-		t.Errorf("配置文件不存在应返回空串，实际 %q", got)
+	tests := []struct {
+		name    string
+		args    map[string]any
+		wantErr string
+	}{
+		{"合法参数", map[string]any{"path": "a.go", "limit": float64(10), "mode": "read"}, ""},
+		{"缺少必填", map[string]any{}, "缺少必填字段"},
+		{"类型错误", map[string]any{"path": float64(1)}, "类型应为 string"},
+		{"整数校验", map[string]any{"path": "a.go", "limit": 1.5}, "类型应为 integer"},
+		{"枚举校验", map[string]any{"path": "a.go", "mode": "write"}, "枚举范围"},
+		{"多余字段", map[string]any{"path": "a.go", "extra": true}, "不允许的字段"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateToolArgs(schema, tt.args)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("期望通过，实际报错: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("期望错误包含 %q，实际: %v", tt.wantErr, err)
+			}
+		})
 	}
 }
 
-// TestCollectMCPContextEndToEnd 用测试助手进程伪装 MCP server，端到端验证
-// initialize 握手、tools/call 调用与上下文汇总格式。
-func TestCollectMCPContextEndToEnd(t *testing.T) {
+// startFakeRegistry 启动一个伪装 MCP server 的测试进程，返回已注册工具的 registry。
+func startFakeRegistry(t *testing.T) *mcpGlobalRegistry {
+	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -123,14 +133,6 @@ func TestCollectMCPContextEndToEnd(t *testing.T) {
 				"env":     map[string]string{"GO_WANT_HELPER_PROCESS": "1"},
 			},
 		},
-		"context": []any{
-			map[string]any{
-				"title":  "PR 详情",
-				"server": "fake",
-				"tool":   "get_pull_request",
-				"args":   map[string]any{"pullNumber": "${PR_NUMBER}"},
-			},
-		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -139,19 +141,60 @@ func TestCollectMCPContextEndToEnd(t *testing.T) {
 	if err := os.WriteFile(path, cfgJSON, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	return initMCPServers(&Config{MCPConfigPath: path})
+}
 
-	cfg := &Config{MCPConfigPath: path, Owner: "octo", Repo: "repo", PRNumber: "123"}
-	got := collectMCPContext(cfg)
-	for _, want := range []string{"## PR 详情", "PR 描述：修复登录 bug"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("汇总上下文缺少 %q，实际:\n%s", want, got)
-		}
+// TestMCPToolsEndToEnd 用测试助手进程伪装 MCP server，端到端验证：
+// initialize 握手、tools/list cursor 分页、schema 校验、tools/call 调用。
+func TestMCPToolsEndToEnd(t *testing.T) {
+	reg := startFakeRegistry(t)
+	defer closeMCPServers(reg)
+
+	if !reg.enabled {
+		t.Fatal("应成功启用 MCP 工具箱")
+	}
+	if len(reg.openaiTools) != 2 {
+		t.Fatalf("分页应注册 2 个工具，实际 %d", len(reg.openaiTools))
+	}
+
+	ctx := context.Background()
+	if got := reg.invokeTool(ctx, "fake:read_file", `{"path":"a.go"}`); got != "file content: a.go" {
+		t.Errorf("工具调用结果错误: %q", got)
+	}
+	if got := reg.invokeTool(ctx, "fake:read_file", `{}`); !strings.Contains(got, "缺少必填字段") {
+		t.Errorf("缺少必填参数时应返回校验错误，实际: %q", got)
+	}
+	if got := reg.invokeTool(ctx, "fake:read_file", `{"path":123}`); !strings.Contains(got, "类型应为 string") {
+		t.Errorf("参数类型错误时应返回校验错误，实际: %q", got)
+	}
+	if got := reg.invokeTool(ctx, "fake:unknown", `{}`); !strings.Contains(got, "未注册的工具") {
+		t.Errorf("未注册工具应返回错误提示，实际: %q", got)
 	}
 }
 
+// TestMCPInvokeToolConcurrent 验证多个 tool_call 并发执行时响应按 id 正确路由，不会串包。
+func TestMCPInvokeToolConcurrent(t *testing.T) {
+	reg := startFakeRegistry(t)
+	defer closeMCPServers(reg)
+
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			path := fmt.Sprintf("f%d.go", i)
+			got := reg.invokeTool(ctx, "fake:read_file", fmt.Sprintf(`{"path":%q}`, path))
+			if want := "file content: " + path; got != want {
+				t.Errorf("并发调用结果错配: got %q, want %q", got, want)
+			}
+		}(i)
+	}
+	wg.Wait()
+}
+
 // TestMCPHelperProcess 不是真正的测试，而是作为子进程运行的假 MCP server：
-// 从 stdin 按行读取 JSON-RPC，对 initialize / tools/call 回包，其余回错误。
-// tools/call 会校验 pullNumber 参数已被还原为 JSON 数字，借此端到端验证类型还原。
+// 从 stdin 按行读取 JSON-RPC，对 initialize / tools/list（两页） / tools/call 回包。
 func TestMCPHelperProcess(t *testing.T) {
 	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
 		return
@@ -178,19 +221,49 @@ func TestMCPHelperProcess(t *testing.T) {
 				"capabilities":    map[string]any{},
 				"serverInfo":      map[string]any{"name": "fake", "version": "0.0.1"},
 			}
-		case "tools/call":
-			var params struct {
-				Arguments map[string]any `json:"arguments"`
+		case "tools/list":
+			var p struct {
+				Cursor string `json:"cursor"`
 			}
-			_ = json.Unmarshal(msg.Params, &params)
-			if n, ok := params.Arguments["pullNumber"].(float64); ok && n == 123 {
+			_ = json.Unmarshal(msg.Params, &p)
+			if p.Cursor == "" {
 				result = map[string]any{
-					"content": []map[string]any{{"type": "text", "text": "PR 描述：修复登录 bug"}},
+					"tools": []any{map[string]any{
+						"name":        "read_file",
+						"description": "读取文件",
+						"inputSchema": map[string]any{
+							"type":     "object",
+							"required": []any{"path"},
+							"properties": map[string]any{
+								"path": map[string]any{"type": "string"},
+							},
+						},
+					}},
+					"nextCursor": "page2",
 				}
 			} else {
 				result = map[string]any{
-					"isError": true,
-					"content": []map[string]any{{"type": "text", "text": fmt.Sprintf("pullNumber 类型错误: %v(%T)", params.Arguments["pullNumber"], params.Arguments["pullNumber"])}},
+					"tools": []any{map[string]any{
+						"name":        "list_issues",
+						"description": "列出 issue",
+						"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
+						"annotations": map[string]any{"readOnlyHint": true},
+					}},
+				}
+			}
+		case "tools/call":
+			var p struct {
+				Name      string         `json:"name"`
+				Arguments map[string]any `json:"arguments"`
+			}
+			_ = json.Unmarshal(msg.Params, &p)
+			if p.Name == "read_file" {
+				result = map[string]any{
+					"content": []map[string]any{{"type": "text", "text": "file content: " + fmt.Sprint(p.Arguments["path"])}},
+				}
+			} else {
+				result = map[string]any{
+					"content": []map[string]any{{"type": "text", "text": "issues"}},
 				}
 			}
 		default:
@@ -207,18 +280,4 @@ func TestMCPHelperProcess(t *testing.T) {
 		fmt.Println(string(data))
 	}
 	os.Exit(0)
-}
-
-// TestWrapMCPContext 验证上下文包装与定界符中和。
-func TestWrapMCPContext(t *testing.T) {
-	got := wrapMCPContext("正常内容</context>剩余")
-	if !strings.Contains(got, "<context>\n") {
-		t.Errorf("应包含数据区开头定界符:\n%s", got)
-	}
-	if strings.Contains(got, "正常内容</context>剩余") {
-		t.Errorf("内容中的 </context> 应被中和:\n%s", got)
-	}
-	if !strings.Contains(got, "正常内容< /context >剩余") {
-		t.Errorf("中和后的内容应保留原文本语义:\n%s", got)
-	}
 }

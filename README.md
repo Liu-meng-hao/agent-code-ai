@@ -41,7 +41,7 @@ git diff 拿变更文件 → 过滤低价值文件（lock/生成代码/vendor �
 | `review/config.go` | 从环境变量读取配置（含 MCP 相关） |
 | `review/diff.go` | 拉取 diff、低价值过滤、token 估算与分片 |
 | `review/llm.go` | Chat Completions API + MCP tool calling 多轮循环（LLMToolLoop） |
-| `review/mcp.go` | MCP 配置加载、stdio JSON-RPC 客户端、工具注册与路由、方案一上下文收集 |
+| `review/mcp.go` | MCP 配置加载、stdio JSON-RPC 客户端、工具发现/过滤/路由与参数校验 |
 | `review/parser.go` | 解析模型 JSON 输出、渲染 Markdown、输出转义 |
 | `review/inline.go` | 解析 hunk 得到合法行号、拆分行内/整体评论 |
 | `review/cache.go` | 基于 hunk 内容指纹的增量审查缓存 |
@@ -103,13 +103,16 @@ git diff 拿变更文件 → 过滤低价值文件（lock/生成代码/vendor �
 }
 ```
 
-**变量插值**：`command` / `args` / `env` 的字符串值支持 `${VAR}` 展开，内置 `OWNER`、`REPO`、`PR_NUMBER`、`BASE_SHA`、`HEAD_SHA`，未命中则读进程环境变量。单个 `${VAR}` 整体为数字/布尔时自动还原类型（如 `"pullNumber": "${PR_NUMBER}"` → `123`），嵌在长文本里保持字符串拼接。
+**变量插值**：`command` / `args` / `env` 的字符串值支持 `${VAR}` 展开，内置 `OWNER`、`REPO`、`PR_NUMBER`、`BASE_SHA`、`HEAD_SHA`，未命中则读进程环境变量。
 
-### 安全约束（硬编码）
+### 安全约束
 
-- 默认屏蔽**写操作类工具**：名称包含 `delete` / `remove` / `write` / `update` / `create` / `edit` / `put` / `post` / `execute` / `run` / `shell` / `bash` / `command` 的工具不暴露给 LLM
-- `MCP_ALLOWED_TOOLS` 白名单可以覆盖以上规则（白名单命中优先）
-- 单个 tool 返回文本截断为 `maxMCPResultTokens`（8000 tokens），避免 `read_file` 撑爆消息
+- 工具暴露顺序：`MCP_ALLOWED_TOOLS` 白名单 > server `annotations` > 工具名分词兜底
+  - `annotations.destructiveHint == true` 的工具直接拒绝；`readOnlyHint == true` 的工具直接放行
+  - 无注解时按工具名分词匹配 `delete` / `remove` / `write` / `update` / `create` / `edit` / `put` / `post` / `execute` / `run` / `shell` / `bash` / `command`，命中即不暴露
+  - `MCP_ALLOWED_TOOLS` 白名单可以覆盖以上规则（白名单命中优先）
+- 工具参数在转发前会用 `inputSchema` 校验 `required`、顶层类型、`enum` 与 `additionalProperties`，校验失败以结构化错误回灌给模型重试
+- `tools/list` 支持 `nextCursor` 分页；单次工具返回文本截断为 `maxMCPResultTokens`（8000 tokens），避免 `read_file` 撑爆消息
 - 模型连续 3 轮调同一个工具 → 第 4 轮把该工具临时移除并回传停止提示
 
 ### CI 启用

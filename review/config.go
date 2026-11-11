@@ -12,18 +12,18 @@ const defaultMaxReviewTokens = 500000
 
 // Config 保存审查流程所需的全部外部配置，全部来自环境变量。
 type Config struct {
-	APIKey          string // DeepSeek API Key
-	BaseURL         string // LLM 服务地址
-	Model           string // 模型名
-	Owner           string // 仓库 owner
-	Repo            string // 仓库名
-	PRNumber        string // PR 编号
-	BaseSHA         string // PR 基准 commit
-	HeadSHA         string // PR 最新 commit
-	MaxReviewTokens  int64    // 单次审查 token 预算上限（输入+输出），超限即熔断跳过剩余调用
-	MCPConfigPath    string   // MCP 配置文件路径（mcpServers JSON）；文件不存在则禁用 MCP
-	MaxToolRounds    int      // 单批 tool 循环最大轮数（方案二），默认 5；MCP 未启用时退化为 1
-	MCPAllowedTools  []string // 工具白名单（分号分隔）；为空时仅硬编码屏蔽写操作类工具
+	APIKey          string   // DeepSeek API Key
+	BaseURL         string   // LLM 服务地址
+	Model           string   // 模型名
+	Owner           string   // 仓库 owner
+	Repo            string   // 仓库名
+	PRNumber        string   // PR 编号
+	BaseSHA         string   // PR 基准 commit
+	HeadSHA         string   // PR 最新 commit
+	MaxReviewTokens int64    // 单次审查 token 预算上限（输入+输出），超限即熔断跳过剩余调用
+	MCPConfigPath   string   // MCP 配置文件路径（mcpServers JSON）；文件不存在则禁用 MCP
+	MaxToolRounds   int      // 单批 tool 循环最大轮数（方案二），默认 5；MCP 未启用时退化为 1
+	MCPAllowedTools []string // 工具白名单（分号分隔）；为空时按 annotations + 工具名分词兜底过滤写操作类工具
 }
 
 // LoadConfig 从环境变量读取配置，缺失必需项时返回错误。
